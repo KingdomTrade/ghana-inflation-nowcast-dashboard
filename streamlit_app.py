@@ -637,10 +637,14 @@ if not sep2026_live.empty:
                 tone = "warn"
         live_cards.append(metric_html(STATE_LABEL[s], value, detail, style, tone))
 
-    st.markdown(
-        f'<div class="metric-grid" style="grid-template-columns:repeat(4,minmax(0,1fr));">{"".join(live_cards)}</div>',
-        unsafe_allow_html=True,
-    )
+    # Render each live-vintage card separately.  Streamlit's Markdown parser can
+    # expose raw HTML when several multi-line card fragments are concatenated
+    # inside one HTML wrapper, so use native columns while preserving the same
+    # metric-card styling.
+    live_cols = st.columns(4)
+    for col, card in zip(live_cols, live_cards):
+        with col:
+            st.markdown(card, unsafe_allow_html=True)
 
     if len(live_generated) >= 2:
         first = live_generated.sort_values("state_order").iloc[0]
