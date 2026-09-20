@@ -184,6 +184,7 @@ PUBLIC_FILES = {
     "Study I news vintages": "phase1_news_vintages.csv",
     "Study II information vintages": "study2_information_vintages.csv",
     "Study II model matrix": "study2_model_matrix.csv",
+    "September 2026 prospective nowcasts": "sep2026_prospective_nowcasts.csv",
 }
 
 
@@ -212,6 +213,7 @@ study1 = read_csv_file(PUBLIC_FILES["Study I monthly data"])
 phase1_vintages = read_csv_file(PUBLIC_FILES["Study I news vintages"])
 study2_info = read_csv_file(PUBLIC_FILES["Study II information vintages"])
 study2_matrix = read_csv_file(PUBLIC_FILES["Study II model matrix"])
+sep2026_live = read_csv_file(PUBLIC_FILES["September 2026 prospective nowcasts"])
 
 if combined is None or combined.empty:
     st.error(
@@ -274,6 +276,20 @@ if guardrail is not None and not guardrail.empty:
     hist = hist.sort_values("month").reset_index(drop=True)
 else:
     hist = apply_guardrail(combined)
+
+# Prepare the optional September-2026 prospective file. Keeping this separate
+# from the evaluated historical panel ensures that incomplete live vintages do
+# not enter MAE/RMSE calculations before the official GSS outcome is released.
+if sep2026_live is not None and not sep2026_live.empty:
+    sep2026_live = sep2026_live.copy()
+    sep2026_live["state_order"] = pd.to_numeric(sep2026_live["state_order"], errors="coerce")
+    sep2026_live["base_nowcast_yoy_pct"] = pd.to_numeric(sep2026_live["base_nowcast_yoy_pct"], errors="coerce")
+    sep2026_live["guardrail_correction_pp"] = pd.to_numeric(sep2026_live["guardrail_correction_pp"], errors="coerce")
+    sep2026_live["final_nowcast_yoy_pct"] = pd.to_numeric(sep2026_live["final_nowcast_yoy_pct"], errors="coerce")
+    sep2026_live["generated"] = sep2026_live["status"].astype(str).str.upper().eq("GENERATED")
+    sep2026_live = sep2026_live.sort_values("state_order").reset_index(drop=True)
+else:
+    sep2026_live = pd.DataFrame()
 
 # =============================================================================
 # HELPERS
@@ -413,6 +429,20 @@ if validation_summary is not None and not validation_summary.empty:
 
 activation_2026 = int(sum(hist.loc[hist["month"].dt.year == 2026, f"{s}_active"].sum() for s in STATES))
 
+# Latest prospective September state (if packaged).
+live_target_month = "2026-09"
+live_generated = sep2026_live[sep2026_live["generated"]].copy() if not sep2026_live.empty else pd.DataFrame()
+if not live_generated.empty:
+    live_latest = live_generated.sort_values("state_order").iloc[-1]
+    live_latest_state = str(live_latest["state"])
+    live_latest_label = STATE_LABEL.get(live_latest_state, live_latest_state)
+    live_latest_value = float(live_latest["final_nowcast_yoy_pct"])
+else:
+    live_latest = None
+    live_latest_state = None
+    live_latest_label = "Pending"
+    live_latest_value = np.nan
+
 # =============================================================================
 # HERO
 # =============================================================================
@@ -434,6 +464,7 @@ st.markdown(
         <span class="hero-chip">13 CPI components</span>
         <span class="hero-chip">Target-month outcome excluded from model inputs</span>
         <span class="hero-chip">Latest evaluated month: {month_name(latest_month)}</span>
+        <span class="hero-chip">Live target: September 2026 • latest completed {live_latest_label}</span>
       </div>
       <div class="authors-line">
         <b>Research team:</b> Acheampong Kwabena Joseph • Dr Julius B. Dasah • Dr Albert Acheampong
@@ -469,6 +500,9 @@ with st.sidebar:
     st.caption("+ Strict-Safe Turning-Point Guardrail")
     st.metric("2026 final MAE", f"{corrected_2026['mae']:.3f}")
     st.metric("2026 MAE improvement", f"{mae_gain_2026:.1f}%")
+    if pd.notna(live_latest_value):
+        st.metric("Sep 2026 live nowcast", f"{live_latest_value:.3f}%", live_latest_label)
+        st.caption("Prospective output. Day 21 and month-end remain pending until their cutoffs close.")
     st.divider()
     st.markdown("#### Open research data")
     st.link_button("View dataset on Zenodo", ZENODO_URL, use_container_width=True)
@@ -505,6 +539,77 @@ st.markdown(
     """,
     unsafe_allow_html=True,
 )
+
+# =============================================================================
+# SEPTEMBER 2026 LIVE PROSPECTIVE PANEL
+# =============================================================================
+
+if not sep2026_live.empty:
+    section_head(
+        "September 2026 live prospective nowcast",
+        "Frozen prospective architecture. September realised inflation is not used; incomplete vintages remain pending until their exact cutoff closes.",
+    )
+
+    live_cards = []
+    for s in STATES:
+        q = sep2026_live[sep2026_live["state"].astype(str).eq(s)]
+        if q.empty:
+            value = "Pending"
+            detail = "No prospective row packaged"
+            style = ""
+            tone = "warn"
+        else:
+            r = q.iloc[0]
+            if bool(r["generated"]) and pd.notna(r["final_nowcast_yoy_pct"]):
+                value = f"{float(r['final_nowcast_yoy_pct']):.3f}%"
+                active = str(r.get("guardrail_active", "False")).strip().lower() == "true"
+                detail = f"Cutoff {str(r['cutoff_date'])[:10]} • guardrail {'active' if active else 'inactive'}"
+                style = "highlight" if s == live_latest_state else ""
+                tone = "good"
+            else:
+                value = "Pending"
+                detail = f"Available after {str(r['cutoff_date'])[:10]} cutoff"
+                style = ""
+                tone = "warn"
+        live_cards.append(metric_html(STATE_LABEL[s], value, detail, style, tone))
+
+    st.markdown(
+        f'<div class="metric-grid" style="grid-template-columns:repeat(4,minmax(0,1fr));">{"".join(live_cards)}</div>',
+        unsafe_allow_html=True,
+    )
+
+    if len(live_generated) >= 2:
+        first = live_generated.sort_values("state_order").iloc[0]
+        last = live_generated.sort_values("state_order").iloc[-1]
+        revision = float(last["final_nowcast_yoy_pct"] - first["final_nowcast_yoy_pct"])
+        live_note = (
+            '<div class="callout gold"><b>Live revision:</b> the September nowcast moved from '
+            f'<b>{float(first["final_nowcast_yoy_pct"]):.3f}%</b> at {STATE_LABEL.get(str(first["state"]), str(first["state"]))} '
+            f'to <b>{float(last["final_nowcast_yoy_pct"]):.3f}%</b> at {STATE_LABEL.get(str(last["state"]), str(last["state"]))} '
+            f'({revision:+.3f} percentage points). The strict-safe guardrail is inactive for the completed September vintages currently shown.</div>'
+        )
+        st.markdown(live_note, unsafe_allow_html=True)
+
+        live_fig = go.Figure()
+        live_fig.add_trace(go.Scatter(
+            x=[STATE_LABEL.get(str(s), str(s)) for s in live_generated["state"]],
+            y=live_generated["final_nowcast_yoy_pct"],
+            mode="lines+markers+text",
+            text=[f"{v:.3f}%" for v in live_generated["final_nowcast_yoy_pct"]],
+            textposition="top center",
+            name="Final prospective nowcast",
+            line=dict(color=GH_GREEN, width=3),
+            marker=dict(size=9),
+            hovertemplate="%{x}<br>September nowcast %{y:.3f}%<extra></extra>",
+        ))
+        live_fig.update_layout(**base_layout(
+            title="September 2026 prospective revision path",
+            height=360,
+            ytitle="Headline inflation nowcast (YoY %)",
+            xtitle="Information vintage",
+            legend=False,
+        ))
+        st.plotly_chart(live_fig, use_container_width=True, config={"displayModeBar": False})
 
 PAGES = ["Executive", "Nowcast Explorer", "Turning Points", "Validation", "Methodology", "Data & Authors"]
 page = st.radio("Dashboard section", PAGES, horizontal=True, label_visibility="collapsed")
@@ -773,6 +878,7 @@ elif page == "Data & Authors":
         "Study I news vintages": phase1_vintages,
         "Study II information vintages": study2_info,
         "Study II model matrix": study2_matrix,
+        "September 2026 prospective nowcasts": sep2026_live,
     }
     resource_roles = {
         "Historical nowcasts": "Actual inflation and four within-month nowcast paths",
@@ -782,6 +888,7 @@ elif page == "Data & Authors":
         "Study I news vintages": "Day 7/14/21/month-end Study I news states",
         "Study II information vintages": "Leakage-controlled macro information states",
         "Study II model matrix": "Final Study II model-ready information matrix",
+        "September 2026 prospective nowcasts": "Live frozen prospective Day 7/14/21/month-end status and nowcasts",
     }
     manifest_rows = []
     for label, filename in PUBLIC_FILES.items():
