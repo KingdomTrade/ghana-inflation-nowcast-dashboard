@@ -1,0 +1,5 @@
+target_month,state,state_order,cutoff_date,base_nowcast_yoy_pct,guardrail_active,guardrail_correction_pp,final_nowcast_yoy_pct,status,actual_target_used,architecture
+2026-09,S1_Day7,1,2026-09-07 23:59:59,1.4809901843440443,False,0.0,1.4809901843440443,GENERATED,0,Transport LAST_2 + FAO Food ExtraTrees FULL_PATH + Strict-Safe Turning-Point Guardrail
+2026-09,S2_Day14,2,2026-09-14 23:59:59,1.5929409726869848,False,0.0,1.5929409726869848,GENERATED,0,Transport LAST_2 + FAO Food ExtraTrees FULL_PATH + Strict-Safe Turning-Point Guardrail
+2026-09,S3_Day21,3,2026-09-21 23:59:59,,,,,PENDING,0,Transport LAST_2 + FAO Food ExtraTrees FULL_PATH + Strict-Safe Turning-Point Guardrail
+2026-09,S4_MonthEnd,4,2026-09-30 23:59:59,,,,,PENDING,0,Transport LAST_2 + FAO Food ExtraTrees FULL_PATH + Strict-Safe Turning-Point Guardrail
