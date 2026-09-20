@@ -291,6 +291,53 @@ if sep2026_live is not None and not sep2026_live.empty:
 else:
     sep2026_live = pd.DataFrame()
 
+# Build a display-only panel that extends the evaluated history with the current
+# prospective month.  This row is NEVER used for MAE/RMSE or model evaluation;
+# it exists only so the live month appears naturally in the dashboard charts
+# and Nowcast Explorer while the official target remains unknown.
+def build_display_panel(history: pd.DataFrame, live: pd.DataFrame) -> pd.DataFrame:
+    out = history.copy()
+    if live is None or live.empty:
+        return out
+
+    live_month = str(live.iloc[0].get("target_month", "2026-09"))[:7]
+    if live_month in set(out["target_month"].astype(str)):
+        return out
+
+    row = {
+        "target_month": live_month,
+        "month": pd.Period(live_month, freq="M"),
+        "date": pd.Period(live_month, freq="M").to_timestamp(),
+        "actual": np.nan,
+    }
+
+    for s in STATES:
+        q = live[live["state"].astype(str).eq(s)]
+        if q.empty:
+            base = np.nan
+            final = np.nan
+            correction = 0.0
+            active = False
+        else:
+            r = q.iloc[0]
+            generated = bool(r.get("generated", False))
+            base = float(r["base_nowcast_yoy_pct"]) if generated and pd.notna(r["base_nowcast_yoy_pct"]) else np.nan
+            final = float(r["final_nowcast_yoy_pct"]) if generated and pd.notna(r["final_nowcast_yoy_pct"]) else np.nan
+            correction = float(r["guardrail_correction_pp"]) if generated and pd.notna(r["guardrail_correction_pp"]) else 0.0
+            active = str(r.get("guardrail_active", "False")).strip().lower() == "true" if generated else False
+
+        row[s] = base
+        row[f"{s}_corrected"] = final
+        row[f"{s}_correction"] = correction
+        row[f"{s}_active"] = active
+
+    live_row = pd.DataFrame([row])
+    out = pd.concat([out, live_row], ignore_index=True, sort=False)
+    return out.sort_values("month").reset_index(drop=True)
+
+
+hist_display = build_display_panel(hist, sep2026_live)
+
 # =============================================================================
 # HELPERS
 # =============================================================================
@@ -515,12 +562,28 @@ with st.sidebar:
 
 latest_state_final = float(latest_row[f"{state}_corrected"])
 latest_state_error = latest_state_final - latest_actual
+
+# The headline nowcast card follows the CURRENT prospective month whenever the
+# selected information vintage has been completed; otherwise it shows Pending.
+live_selected = sep2026_live[sep2026_live["state"].astype(str).eq(state)] if not sep2026_live.empty else pd.DataFrame()
+if not live_selected.empty and bool(live_selected.iloc[0].get("generated", False)) and pd.notna(live_selected.iloc[0].get("final_nowcast_yoy_pct")):
+    selected_live_value = f"{float(live_selected.iloc[0]['final_nowcast_yoy_pct']):.3f}%"
+    selected_live_detail = f"September 2026 • prospective • cutoff {str(live_selected.iloc[0]['cutoff_date'])[:10]}"
+    selected_live_tone = "good"
+else:
+    selected_live_value = "Pending"
+    if not live_selected.empty:
+        selected_live_detail = f"September 2026 • available after {str(live_selected.iloc[0]['cutoff_date'])[:10]} cutoff"
+    else:
+        selected_live_detail = "September 2026 • prospective output not yet packaged"
+    selected_live_tone = "warn"
+
 st.markdown(
     f"""
     <div class="metric-grid">
       {metric_html("Latest actual headline inflation", f"{latest_actual:.1f}%", month_name(latest_month), "gold")}
-      {metric_html(f"{STATE_LABEL[state]} final nowcast", f"{latest_state_final:.2f}%", f"Error {latest_state_error:+.2f} pp", "highlight", "good" if abs(latest_state_error)<=.5 else "warn")}
-      {metric_html("2026 final MAE", f"{corrected_2026['mae']:.3f}", f"Base MAE {base_2026['mae']:.3f}", "highlight", "good")}
+      {metric_html(f"Current {STATE_LABEL[state]} nowcast", selected_live_value, selected_live_detail, "highlight", selected_live_tone)}
+      {metric_html("2026 final MAE", f"{corrected_2026['mae']:.3f}", f"Evaluated through {month_name(latest_month)} • Base MAE {base_2026['mae']:.3f}", "highlight", "good")}
       {metric_html("2026 MAE improvement", f"{mae_gain_2026:.1f}%", f"RMSE improvement {rmse_gain_2026:.1f}%", "gold", "good")}
       {metric_html("Independent confirmation", f"{confirmation_corrected_mae:.3f}" if pd.notna(confirmation_corrected_mae) else "Available", f"2023–2025 final MAE • {confirmation_gain:+.1f}% vs base" if pd.notna(confirmation_gain) else "Guardrail validation", "", "good")}
     </div>
@@ -535,6 +598,7 @@ st.markdown(
       <span class="status-pill"><span class="status-dot"></span> Target-month actual used in model: NO</span>
       <span class="status-pill"><span class="status-dot"></span> 2026 guardrail activations: {activation_2026}</span>
       <span class="status-pill"><span class="status-dot"></span> Four within-month information states</span>
+      <span class="status-pill"><span class="status-dot"></span> September 2026 live through {live_latest_label}</span>
     </div>
     """,
     unsafe_allow_html=True,
@@ -623,9 +687,17 @@ if page == "Executive":
         "Executive view",
         "Monthly labels are displayed directly on the horizontal axis; use the sidebar window selector to focus the chart.",
     )
-    display = display_window(hist, chart_window)
+    display = display_window(hist_display, chart_window)
     fig = go.Figure()
     add_target_band(fig)
+    if not sep2026_live.empty:
+        fig.add_vrect(
+            x0="2026-09-01", x1="2026-10-01",
+            fillcolor="rgba(0,107,63,.045)", line_width=0, layer="below",
+            annotation_text="Sep 2026 live • actual pending",
+            annotation_position="top right",
+            annotation_font=dict(size=10, color=GH_GREEN),
+        )
     fig.add_trace(go.Scatter(
         x=display["date"], y=display["actual"], mode="lines+markers", name="Actual headline inflation",
         line=dict(color=GH_BLACK, width=3), marker=dict(size=6),
@@ -655,8 +727,15 @@ if page == "Executive":
     left, right = st.columns([1.45, 1])
     with left:
         section_head("2026 information journey", "Each target month is estimated at four increasingly informed checkpoints.")
-        y26 = hist[hist["month"].dt.year == 2026].copy()
+        y26 = hist_display[hist_display["month"].dt.year == 2026].copy()
         f = go.Figure()
+        if not sep2026_live.empty:
+            f.add_vrect(
+                x0="2026-09-01", x1="2026-10-01",
+                fillcolor="rgba(0,107,63,.045)", line_width=0, layer="below",
+                annotation_text="Live month", annotation_position="top right",
+                annotation_font=dict(size=10, color=GH_GREEN),
+            )
         f.add_trace(go.Scatter(x=y26["date"], y=y26["actual"], name="Actual", mode="lines+markers", line=dict(color=GH_BLACK, width=3), marker=dict(size=8), hovertemplate="%{x|%B %Y}<br>Actual %{y:.2f}%<extra></extra>"))
         for s, color in zip(STATES, [GH_RED, "#C49300", TEAL, GH_GREEN]):
             f.add_trace(go.Scatter(x=y26["date"], y=y26[f"{s}_corrected"], name=STATE_LABEL[s], mode="lines+markers", line=dict(width=1.9, color=color), marker=dict(size=5), hovertemplate=f"%{{x|%B %Y}}<br>{STATE_LABEL[s]} %{{y:.2f}}%<extra></extra>"))
@@ -685,32 +764,66 @@ if page == "Executive":
 # =============================================================================
 
 elif page == "Nowcast Explorer":
-    section_head("Nowcast explorer", "Inspect any target month and compare the four information vintages with realised headline inflation.")
-    months = hist["target_month"].tolist()
+    section_head("Nowcast explorer", "Inspect any target month and compare the four information vintages. The current prospective month is included even before the official outcome is released.")
+    months = hist_display["target_month"].astype(str).tolist()
     selected_month = st.selectbox("Target month", months, index=len(months)-1, format_func=month_name)
-    row = hist[hist["target_month"].eq(selected_month)].iloc[0]
+    row = hist_display[hist_display["target_month"].astype(str).eq(selected_month)].iloc[0]
+
+    actual_value = pd.to_numeric(pd.Series([row.get("actual", np.nan)]), errors="coerce").iloc[0]
+    actual_available = pd.notna(actual_value)
 
     cards = []
     for s in STATES:
-        base = float(row[s]); final = float(row[f"{s}_corrected"]); err = final - float(row["actual"])
-        active_flag = bool(row[f"{s}_active"])
-        cards.append(metric_html(STATE_LABEL[s], f"{final:.2f}%", f"Base {base:.2f}% • Error {err:+.2f} pp" + (" • guardrail active" if active_flag else ""), "highlight" if s == state else "", "good" if abs(err)<=.5 else "warn" if abs(err)<=1 else "bad"))
+        base = pd.to_numeric(pd.Series([row.get(s, np.nan)]), errors="coerce").iloc[0]
+        final = pd.to_numeric(pd.Series([row.get(f"{s}_corrected", np.nan)]), errors="coerce").iloc[0]
+        active_flag = bool(row.get(f"{s}_active", False))
+
+        if pd.isna(final):
+            value = "Pending"
+            q = sep2026_live[sep2026_live["state"].astype(str).eq(s)] if selected_month == "2026-09" and not sep2026_live.empty else pd.DataFrame()
+            detail = f"Available after {str(q.iloc[0]['cutoff_date'])[:10]} cutoff" if not q.empty else "No nowcast available"
+            tone = "warn"
+        elif actual_available:
+            err = float(final - actual_value)
+            value = f"{float(final):.2f}%"
+            detail = f"Base {float(base):.2f}% • Error {err:+.2f} pp" + (" • guardrail active" if active_flag else "")
+            tone = "good" if abs(err) <= .5 else "warn" if abs(err) <= 1 else "bad"
+        else:
+            value = f"{float(final):.3f}%"
+            detail = f"Base {float(base):.3f}% • prospective • actual pending" + (" • guardrail active" if active_flag else "")
+            tone = "good"
+
+        cards.append(metric_html(STATE_LABEL[s], value, detail, "highlight" if s == state else "", tone))
+
     st.markdown(f'<div class="metric-grid" style="grid-template-columns:repeat(4,minmax(0,1fr));">{"".join(cards)}</div>', unsafe_allow_html=True)
 
-    actual = float(row["actual"])
     cats = [STATE_LABEL[s] for s in STATES]
     b = go.Figure()
-    b.add_hline(y=actual, line=dict(color=GH_BLACK, width=2.5), annotation_text=f"Actual {actual:.1f}%", annotation_position="top left")
-    b.add_trace(go.Bar(x=cats, y=[row[s] for s in STATES], name="Base", marker_color="#BFC8C2", opacity=.72, hovertemplate="%{x}<br>Base %{y:.2f}%<extra></extra>"))
-    b.add_trace(go.Bar(x=cats, y=[row[f"{s}_corrected"] for s in STATES], name="Final", marker_color=[GH_GOLD if bool(row[f"{s}_active"]) else GH_GREEN for s in STATES], hovertemplate="%{x}<br>Final %{y:.2f}%<extra></extra>"))
+    if actual_available:
+        b.add_hline(y=float(actual_value), line=dict(color=GH_BLACK, width=2.5), annotation_text=f"Actual {float(actual_value):.1f}%", annotation_position="top left")
+    else:
+        b.add_annotation(
+            x=.02, y=.98, xref="paper", yref="paper", showarrow=False,
+            text="Official realised CPI: pending",
+            font=dict(size=11, color=MUTED), bgcolor="rgba(255,255,255,.82)",
+        )
+    b.add_trace(go.Bar(x=cats, y=[row.get(s, np.nan) for s in STATES], name="Base", marker_color="#BFC8C2", opacity=.72, hovertemplate="%{x}<br>Base %{y:.3f}%<extra></extra>"))
+    b.add_trace(go.Bar(x=cats, y=[row.get(f"{s}_corrected", np.nan) for s in STATES], name="Final", marker_color=[GH_GOLD if bool(row.get(f"{s}_active", False)) else GH_GREEN for s in STATES], hovertemplate="%{x}<br>Final %{y:.3f}%<extra></extra>"))
     b.update_layout(**base_layout(title=f"Information-vintage profile • {month_name(selected_month)}", height=445, ytitle="Headline inflation (YoY %)"))
     b.update_layout(barmode="group", margin=dict(l=25,r=20,t=60,b=45))
     st.plotly_chart(b, use_container_width=True, config={"displayModeBar": False})
 
-    section_head("Historical monthly path", "Every month is labelled directly; select a shorter chart window in the sidebar if needed.")
-    display = display_window(hist, chart_window)
+    section_head("Historical + live monthly path", "Evaluated history is extended with the current prospective month; the September actual remains blank until GSS releases it.")
+    display = display_window(hist_display, chart_window)
     h = go.Figure()
     add_target_band(h)
+    if not sep2026_live.empty:
+        h.add_vrect(
+            x0="2026-09-01", x1="2026-10-01",
+            fillcolor="rgba(0,107,63,.045)", line_width=0, layer="below",
+            annotation_text="Sep 2026 live", annotation_position="top right",
+            annotation_font=dict(size=10, color=GH_GREEN),
+        )
     h.add_trace(go.Scatter(x=display["date"], y=display["actual"], name="Actual", mode="lines+markers", line=dict(color=GH_BLACK, width=3), marker=dict(size=5), hovertemplate="%{x|%B %Y}<br>Actual %{y:.2f}%<extra></extra>"))
     h.add_trace(go.Scatter(x=display["date"], y=display[f"{state}_corrected"], name="Final", mode="lines+markers", line=dict(color=GH_GREEN, width=2.5), marker=dict(size=4), hovertemplate="%{x|%B %Y}<br>Final %{y:.2f}%<extra></extra>"))
     h.update_layout(**base_layout(title=f"{STATE_LABEL[state]} historical nowcast path", height=540, ytitle="YoY %", xtitle="Month"))
